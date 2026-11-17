@@ -8,7 +8,9 @@
     {% for v in versions %}
     <tr>
       <td>v{{ v.id }}</td>
-      <td>{% if v.status=='active' %}<span class="tag ok">当前</span>{% else %}<span class="tag hist">历史</span>{% endif %}</td>
+      <td>{% if v.status=='active' %}<span class="tag ok">当前</span>
+          {% elif v.status=='invalidated' %}<span class="tag fail">已失效·撤回</span>
+          {% else %}<span class="tag hist">历史</span>{% endif %}</td>
       <td>{{ v.image_count }}</td>
       <td class="muted">{{ v.class_names }} ｜ {{ v.quotas }}</td>
       <td>{{ v.created_at }}</td>
@@ -25,7 +27,8 @@
     {% for j in jobs %}
     <tr>
       <td>#{{ j.id }}</td>
-      <td>v{{ j.version_id }}{% if j.version_status!='active' %} <span class="tag hist">过期</span>{% endif %}</td>
+      <td>v{{ j.version_id }}{% if j.version_status=='invalidated' %} <span class="tag fail">已失效</span>
+          {% elif j.version_status!='active' %} <span class="tag hist">过期</span>{% endif %}</td>
       <td>{% if j.status=='succeeded' %}<span class="tag ok">成功</span>
           {% elif j.status=='failed' %}<span class="tag fail">失败</span>
           {% else %}<span class="tag run">{{ j.status }}</span>{% endif %}</td>
@@ -48,7 +51,9 @@
     <tr>
       <td>#{{ m.id }}</td>
       <td>v{{ m.version_id }}</td>
-      <td>{% if m.version_status=='active' %}<span class="tag ok">当前</span>{% else %}<span class="tag hist">历史-停供</span>{% endif %}</td>
+      <td>{% if m.version_status=='active' %}<span class="tag ok">当前</span>
+          {% elif m.version_status=='invalidated' %}<span class="tag fail">已失效·撤回-停供</span>
+          {% else %}<span class="tag hist">历史-停供</span>{% endif %}</td>
       <td>{{ m.created_at }}</td>
       <td>
         {% if m.version_status=='active' %}

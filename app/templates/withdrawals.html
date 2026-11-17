@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}患者撤回登记{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>登记患者撤回（按患者号，不可解除）</h2>
+  <p class="muted">
+    登记成功后：含该患者的<strong>当前版本立即失效</strong>、清单停止下载（历史明细仅留追溯，不可下载）；
+    需<strong>重新上传不含该患者的全量 CSV 并重新划分</strong>才能恢复供数；
+    此后即使更换图像号，含该患者号的上传一律拒绝。重复登记同一患者将返回原记录，不重复生效。
+  </p>
+  <form method="post" action="{{ url_for('register_withdrawal') }}">
+    <div style="margin:8px 0">
+      <label style="display:inline-block;width:90px">患者号：</label>
+      <input type="text" name="patient_no" required maxlength="64"
+             style="padding:7px 10px;border:1px solid var(--line);border-radius:6px;width:220px"
+             placeholder="如 P001">
+    </div>
+    <div style="margin:8px 0">
+      <label style="display:inline-block;width:90px">备注（可选）：</label>
+      <input type="text" name="reason" maxlength="200"
+             style="padding:7px 10px;border:1px solid var(--line);border-radius:6px;width:420px"
+             placeholder="如：收到患者样本撤回通知">
+    </div>
+    <p style="margin-top:10px"><button class="btn" type="submit">登记撤回（不可解除）</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>撤回登记与受影响清单（{{ items|length }}）</h2>
+  {% for w in items %}
+  <div style="border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:14px">
+    <p style="margin:0 0 8px">
+      <strong>#{{ w.id }} ｜ 患者 {{ w.patient_no }}</strong>
+      <span class="tag fail">不可解除</span>
+      <span class="muted">登记于 {{ w.created_at }}
+        {% if w.reason %}｜ 备注：{{ w.reason }}{% endif %}
+        {% if w.invalidated_version_id %}｜ 登记时使当前版本 v{{ w.invalidated_version_id }} 立即失效{% endif %}
+      </span>
+    </p>
+    {% if w.affected %}
+    <table>
+      <tr><th>受影响清单</th><th>所属版本</th><th>版本状态</th><th>该患者图像数</th><th>图像号</th><th>侧别</th><th>下载</th></tr>
+      {% for a in w.affected %}
+      <tr>
+        <td>#{{ a.manifest_id }}</td>
+        <td>v{{ a.version_id }}</td>
+        <td>
+          {% if a.version_status == 'active' %}<span class="tag ok">当前</span>
+          {% elif a.version_status == 'invalidated' %}<span class="tag fail">已失效·撤回</span>
+          {% else %}<span class="tag hist">历史</span>{% endif %}
+        </td>
+        <td>{{ a.hit_count }}</td>
+        <td class="muted">{{ a.image_nos }}</td>
+        <td class="muted">{{ a.sides }}</td>
+        <td><span class="muted">已停供（明细仅留追溯）</span></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="muted" style="margin:0">该患者未出现在任何已发布清单中（预防性登记，今后含该患者号的上传将被拒绝）。</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">暂无撤回登记。</p>
+  {% endfor %}
+</div>
+{% endblock %}

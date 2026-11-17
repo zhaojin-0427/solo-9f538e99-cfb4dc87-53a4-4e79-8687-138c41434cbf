@@ -1,6 +1,14 @@
 {% extends "base.html" %}
 {% block body %}
 
+{% if withdrawal_count %}
+<div class="card" style="border-color:#fecaca;background:#fff7f7">
+  <strong>患者撤回生效中：</strong>已有 {{ withdrawal_count }} 名患者登记撤回（不可解除）。
+  含撤回患者的版本已失效停供；重新上传含其患者号的 CSV 将被拒绝（即使更换图像号）。
+  <a href="{{ url_for('withdrawals') }}">查看撤回登记与受影响清单</a>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>① 上传 / 更正输入（限 40 张图、4 类；每次更正都会生成新版本，旧清单立即停供）</h2>
   <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
@@ -90,7 +98,8 @@
     <tr>
       <td>#{{ j.id }}</td>
       <td>v{{ j.version_id }}
-        {% if j.version_status != 'active' %}<span class="tag hist">已过期</span>{% endif %}</td>
+        {% if j.version_status == 'invalidated' %}<span class="tag fail">已失效</span>
+        {% elif j.version_status != 'active' %}<span class="tag hist">已过期</span>{% endif %}</td>
       <td>
         {% if j.status in ('queued','running') %}<span class="tag run">{{ j.status }}</span>
         {% elif j.status == 'succeeded' %}<span class="tag ok">成功</span>

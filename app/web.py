@@ -55,6 +55,7 @@ def create_app(db_path: str | None = None) -> Flask:
             quotas=quotas,
             val_counts=val_counts,
             train_counts=train_counts,
+            withdrawal_count=svc.withdrawal_count(),
         )
 
     # ------------------------------------------------------------ 上传/更正
@@ -178,6 +179,49 @@ def create_app(db_path: str | None = None) -> Flask:
         rows = svc.registry_snapshot()
         return render_template("registry.html", rows=rows)
 
+    # ------------------------------------------------------------ 患者撤回
+    @app.route("/withdrawals")
+    def withdrawals():
+        items = svc.list_withdrawals()
+        return render_template("withdrawals.html", items=items)
+
+    @app.route("/withdrawals", methods=["POST"])
+    def register_withdrawal():
+        patient_no = request.form.get("patient_no", "")
+        reason = request.form.get("reason", "")
+        try:
+            result = svc.register_withdrawal(patient_no, reason)
+        except InputError as exc:
+            # 登记失败不改变原供数状态
+            flash(str(exc), "error")
+            return redirect(url_for("withdrawals"))
+        rec = result["record"]
+        n = len(result["affected"])
+        if not result["created"]:
+            # 重复撤回：返回原记录，状态不变
+            flash(
+                f"患者 {rec['patient_no']} 已在撤回登记中（原记录 #{rec['id']}，"
+                f"登记于 {rec['created_at']}），撤回不可解除，本次未做更改；"
+                f"受影响清单 {n} 份（见下表）。",
+                "info",
+            )
+        elif result["invalidated_version_id"]:
+            flash(
+                f"患者 {rec['patient_no']} 撤回已登记（记录 #{rec['id']}，不可解除）。"
+                f"当前版本 v{result['invalidated_version_id']} 含该患者，已立即失效，"
+                f"清单下载已停止；受影响清单 {n} 份。"
+                "重新上传不含该患者的全量 CSV 并重新划分后才能恢复供数。",
+                "success",
+            )
+        else:
+            flash(
+                f"患者 {rec['patient_no']} 撤回已登记（记录 #{rec['id']}，不可解除）。"
+                f"当前版本不含该患者，供数不受影响；受影响历史清单 {n} 份（保持停供）。"
+                "今后上传含该患者号的 CSV 将被拒绝（即使更换图像号）。",
+                "success",
+            )
+        return redirect(url_for("withdrawals"))
+
     # ------------------------------------------------------------ 下载
     @app.route("/manifests/<int:manifest_id>/download/<side>")
     def download(manifest_id: int, side):
@@ -197,6 +241,21 @@ def create_app(db_path: str | None = None) -> Flask:
         # 更正后旧清单仅作历史：非当前版本一律停供下载
         if manifest["version_status"] != "active":
             flash("该清单所属输入版本已被更正，仅作历史保留，当前下载停供。", "error")
+            return redirect(url_for("history"))
+        # 撤回防线：清单含已撤回患者时一律停供（正常流程下版本失效已先行拦截，
+        # 这里在下载边界再核验一次已提交状态，确保回执后新发起的下载绝不含撤回患者）
+        conn = get_db(svc.db_path)
+        try:
+            blocked = conn.execute(
+                "SELECT COUNT(*) c FROM manifest_entries me "
+                "JOIN patient_withdrawals w ON w.patient_no = me.patient_no "
+                "WHERE me.manifest_id=?",
+                (manifest_id,),
+            ).fetchone()["c"]
+        finally:
+            conn.close()
+        if blocked:
+            flash("该清单含已撤回患者，已停止下载；历史明细仅留追溯。", "error")
             return redirect(url_for("history"))
         entries = [e for e in svc.get_manifest_entries(manifest_id) if e["side"] == side]
         buf = io.StringIO()

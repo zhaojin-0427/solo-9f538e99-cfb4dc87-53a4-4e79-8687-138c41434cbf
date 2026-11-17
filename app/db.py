@@ -2,7 +2,8 @@
 
 所有需要原子性的发布动作都在单个写事务中完成，并配合部分唯一索引保证：
 - 同一输入版本最多一份已发布清单；
-- 同一图像的侧别登记全局唯一（永久固定，不被后续分配改写）。
+- 同一图像的侧别登记全局唯一（永久固定，不被后续分配改写）；
+- 患者撤回登记全局唯一且不可解除，登记与版本失效判定在同一事务内完成。
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS input_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    status TEXT NOT NULL DEFAULT 'active',          -- active | superseded
+    status TEXT NOT NULL DEFAULT 'active',          -- active | superseded | invalidated(撤回失效)
     image_csv TEXT NOT NULL,                        -- 原始 CSV 全文，留档
     dup_csv TEXT NOT NULL,
     image_count INTEGER NOT NULL,
@@ -75,6 +76,17 @@ CREATE TABLE IF NOT EXISTS manifest_entries (
     UNIQUE(manifest_id, image_no)
 );
 
+-- 患者撤回登记：不可解除，患者号全局唯一。
+-- 登记成功的同一事务内，含该患者的当前版本立即转为 invalidated（清单随即停供）；
+-- 此后任何含该患者号的上传一律拒绝（即使更换图像号）。
+CREATE TABLE IF NOT EXISTS patient_withdrawals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_no TEXT NOT NULL UNIQUE,
+    reason TEXT NOT NULL DEFAULT '',
+    invalidated_version_id INTEGER,                 -- 登记时被判定失效的当前版本（可空）
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS partition_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     version_id INTEGER NOT NULL REFERENCES input_versions(id),
@@ -96,6 +108,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_manifest_published
 -- 失败作业不占该约束位，允许更正后或针对同一输入重新发起重试。
 CREATE UNIQUE INDEX IF NOT EXISTS uq_job_active
     ON partition_jobs(version_id) WHERE status IN ('queued', 'running', 'succeeded');
+
+-- 受影响清单查询（按患者号定位清单明细）。
+CREATE INDEX IF NOT EXISTS ix_entries_patient
+    ON manifest_entries(patient_no);
 """
 
 

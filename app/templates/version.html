@@ -3,7 +3,9 @@
 {% block body %}
 <div class="card">
   <h2>输入版本 v{{ version.id }}
-    {% if version.status=='active' %}<span class="tag ok">当前</span>{% else %}<span class="tag hist">历史</span>{% endif %}
+    {% if version.status=='active' %}<span class="tag ok">当前</span>
+    {% elif version.status=='invalidated' %}<span class="tag fail">已失效·撤回</span>
+    {% else %}<span class="tag hist">历史</span>{% endif %}
   </h2>
   <p class="muted">图像 {{ version.image_count }} 张 ｜ 类别 {{ version.class_names }} ｜ 配额 {{ version.quotas }} ｜ 创建 {{ version.created_at }}</p>
   {% if manifest %}

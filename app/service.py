@@ -55,6 +55,23 @@ class Service:
         conn = get_db(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
+            # 已撤回患者不得重新纳入（即使更换图像号）。校验与版本写入在同一事务：
+            # 与撤回登记交错时按已提交状态裁决——撤回先提交则此处必能读到并拒绝；
+            # 本版本先提交则后续撤回会把它判失效。
+            withdrawn = {
+                r["patient_no"]
+                for r in conn.execute(
+                    "SELECT patient_no FROM patient_withdrawals"
+                ).fetchall()
+            }
+            blocked = sorted({r.patient_no for r in images} & withdrawn)
+            if blocked:
+                raise InputError(
+                    "全量 CSV 含已撤回患者（"
+                    + "、".join(blocked)
+                    + "）：撤回不可解除，即使更换图像号也不得重新纳入，本次上传未保存任何内容。"
+                    "请移除上述患者的全部图像后重新上传。"
+                )
             cur = conn.execute(
                 "INSERT INTO input_versions(image_csv, dup_csv, image_count, "
                 "class_names, quotas, note) VALUES (?,?,?,?,?,?)",
@@ -77,9 +94,12 @@ class Service:
                 "INSERT INTO dup_edges(version_id, image_a, image_b) VALUES (?,?,?)",
                 [(vid, a, b) for a, b in dup_edges],
             )
-            # 新版本生效的同一事务里，旧版本全部转为历史
+            # 新版本生效的同一事务里，旧的当前版本转为历史；
+            # 已被撤回判定失效的版本保持 invalidated，留作追溯。
             conn.execute(
-                "UPDATE input_versions SET status='superseded' WHERE id<>?", (vid,)
+                "UPDATE input_versions SET status='superseded' "
+                "WHERE id<>? AND status='active'",
+                (vid,),
             )
             conn.execute("COMMIT")
         except Exception:
@@ -192,13 +212,14 @@ class Service:
             version = conn.execute(
                 "SELECT * FROM input_versions WHERE id=?", (job["version_id"],)
             ).fetchone()
-            # 过期依据不得发布：求解期间输入被更正则版本已 superseded
+            # 过期依据不得发布：求解期间输入被更正（superseded）或患者撤回（invalidated）
             if version["status"] != "active":
                 conn.execute(
                     "UPDATE partition_jobs SET status='failed', fail_stage='stale', "
                     "finished_at=datetime('now'), reason=? WHERE id=?",
                     (
-                        "求解期间输入或配额已被更正，该版本已成为历史，过期依据不得发布。请基于当前版本重新划分。",
+                        "求解期间输入或配额已被更正，或患者撤回使该版本失效，"
+                        "该版本已成为历史，过期依据不得发布。请基于当前版本重新划分。",
                         job_id,
                     ),
                 )
@@ -304,7 +325,11 @@ class Service:
                 conn.execute(
                     "UPDATE partition_jobs SET status='failed', fail_stage='stale', "
                     "finished_at=datetime('now'), reason=? WHERE id=?",
-                    ("求解期间输入或配额已被更正，过期依据不得发布。", job_id),
+                    (
+                        "求解期间输入或配额已被更正，或患者撤回使该版本失效，"
+                        "过期依据不得发布。",
+                        job_id,
+                    ),
                 )
                 conn.execute("COMMIT")
                 return
@@ -447,5 +472,123 @@ class Service:
                     "SELECT * FROM side_registry ORDER BY image_no"
                 ).fetchall()
             )
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------ 撤回
+    def register_withdrawal(self, patient_no: str, reason: str = "") -> dict:
+        """登记患者撤回（不可解除）。幂等：重复登记返回原记录，不改任何状态。
+
+        登记与失效判定在同一写事务内完成：
+        - 含该患者的当前 active 版本立即转为 invalidated，其清单随即停供；
+        - 进行中/排队作业在发布前复查版本状态时会判 stale，不会发布含该患者的清单；
+        - 与上传/发布交错时按已提交状态裁决（谁先提交谁生效）。
+        返回 {"record", "created", "affected", "invalidated_version_id"}。
+        """
+        patient_no = (patient_no or "").strip()
+        if not patient_no:
+            raise InputError("患者号不能为空，撤回登记未生效，供数状态未改变")
+        reason = (reason or "").strip()
+
+        conn = get_db(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM patient_withdrawals WHERE patient_no=?",
+                (patient_no,),
+            ).fetchone()
+            if existing is not None:
+                # 重复撤回：返回原记录，不做任何更改
+                record = dict(existing)
+                created = False
+                invalidated = existing["invalidated_version_id"]
+            else:
+                # 含该患者的当前版本立即失效（同事务，清单下载随即停止）
+                version = conn.execute(
+                    "SELECT id FROM input_versions WHERE status='active' "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                invalidated = None
+                if version is not None:
+                    hit = conn.execute(
+                        "SELECT COUNT(*) c FROM images "
+                        "WHERE version_id=? AND patient_no=?",
+                        (version["id"], patient_no),
+                    ).fetchone()["c"]
+                    if hit:
+                        conn.execute(
+                            "UPDATE input_versions SET status='invalidated' "
+                            "WHERE id=? AND status='active'",
+                            (version["id"],),
+                        )
+                        invalidated = version["id"]
+                cur = conn.execute(
+                    "INSERT INTO patient_withdrawals"
+                    "(patient_no, reason, invalidated_version_id) VALUES (?,?,?)",
+                    (patient_no, reason, invalidated),
+                )
+                record = dict(
+                    conn.execute(
+                        "SELECT * FROM patient_withdrawals WHERE id=?",
+                        (cur.lastrowid,),
+                    ).fetchone()
+                )
+                created = True
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        return {
+            "record": record,
+            "created": created,
+            "affected": self.affected_manifests(patient_no),
+            "invalidated_version_id": invalidated,
+        }
+
+    def affected_manifests(self, patient_no: str) -> list[dict]:
+        """含该患者的全部已发布清单（含已失效/历史版本），供追溯查看；均不可下载。"""
+        conn = get_db(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT m.id AS manifest_id, m.version_id, m.created_at, "
+                "v.status AS version_status, "
+                "COUNT(me.id) AS hit_count, "
+                "GROUP_CONCAT(DISTINCT me.image_no) AS image_nos, "
+                "GROUP_CONCAT(DISTINCT me.side) AS sides "
+                "FROM manifest_entries me "
+                "JOIN manifests m ON m.id=me.manifest_id "
+                "JOIN input_versions v ON v.id=m.version_id "
+                "WHERE me.patient_no=? AND m.status='published' "
+                "GROUP BY m.id ORDER BY m.id DESC",
+                (patient_no,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def list_withdrawals(self) -> list[dict]:
+        """全部撤回登记（含各自受影响清单），按登记时间倒序。"""
+        conn = get_db(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM patient_withdrawals ORDER BY id DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["affected"] = self.affected_manifests(r["patient_no"])
+            out.append(d)
+        return out
+
+    def withdrawal_count(self) -> int:
+        conn = get_db(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) c FROM patient_withdrawals"
+            ).fetchone()["c"]
         finally:
             conn.close()
